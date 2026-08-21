@@ -123,11 +123,18 @@ fn peer_response(mut response: HttpReply) -> HttpReply {
     response
 }
 
-fn forwards_worker_header(name: &str, preserve_representation_length: bool) -> bool {
+fn forwards_worker_header(
+    name: &str,
+    preserve_representation_length: bool,
+    status: StatusCode,
+) -> bool {
     !matches!(
         name.to_ascii_lowercase().as_str(),
         "connection" | "transfer-encoding"
-    ) && (preserve_representation_length || !name.eq_ignore_ascii_case("content-length"))
+    ) && (!name.eq_ignore_ascii_case("content-length")
+        || (preserve_representation_length
+            && !status.is_informational()
+            && status != StatusCode::NO_CONTENT))
 }
 
 fn runtime_response(
@@ -139,7 +146,7 @@ fn runtime_response(
     };
     let mut builder = Response::builder().status(status);
     for (name, value) in worker_response.headers {
-        if !forwards_worker_header(&name, preserve_representation_length) {
+        if !forwards_worker_header(&name, preserve_representation_length, status) {
             continue;
         }
         builder = builder.header(name, value);
@@ -166,20 +173,21 @@ fn peer_runtime_response(
     worker_response: celld::js::HttpResponse,
     preserve_representation_length: bool,
 ) -> HttpReply {
-    let wire_status = if worker_response.status == 101 && worker_response.ws.is_some() {
-        StatusCode::OK
-    } else {
-        let Ok(status) = StatusCode::from_u16(worker_response.status) else {
-            return peer_response(response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid Worker status",
-            ));
-        };
-        status
+    let Ok(worker_status) = StatusCode::from_u16(worker_response.status) else {
+        return peer_response(response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid Worker status",
+        ));
     };
+    let wire_status =
+        if worker_status == StatusCode::SWITCHING_PROTOCOLS && worker_response.ws.is_some() {
+            StatusCode::OK
+        } else {
+            worker_status
+        };
     let mut builder = Response::builder().status(wire_status);
     for (name, value) in worker_response.headers {
-        if !forwards_worker_header(&name, preserve_representation_length) {
+        if !forwards_worker_header(&name, preserve_representation_length, worker_status) {
             continue;
         }
         builder = builder.header(name, value);
@@ -3250,19 +3258,39 @@ impl Drop for AbortPeerFetchOnHangUp {
 #[cfg(test)]
 mod response_header_tests {
     use super::forwards_worker_header;
+    use hyper::StatusCode;
 
     #[test]
     fn preserves_representation_length_only_when_requested() {
-        assert!(!forwards_worker_header("Content-Length", false));
-        assert!(forwards_worker_header("Content-Length", true));
-        assert!(forwards_worker_header("content-type", false));
+        assert!(!forwards_worker_header(
+            "Content-Length",
+            false,
+            StatusCode::OK
+        ));
+        assert!(forwards_worker_header(
+            "Content-Length",
+            true,
+            StatusCode::OK
+        ));
+        assert!(forwards_worker_header(
+            "content-type",
+            false,
+            StatusCode::OK
+        ));
+    }
+
+    #[test]
+    fn rejects_representation_length_for_forbidden_statuses() {
+        for status in [StatusCode::CONTINUE, StatusCode::NO_CONTENT] {
+            assert!(!forwards_worker_header("Content-Length", true, status));
+        }
     }
 
     #[test]
     fn never_forwards_hop_by_hop_framing_headers() {
         for name in ["Connection", "Transfer-Encoding"] {
-            assert!(!forwards_worker_header(name, false));
-            assert!(!forwards_worker_header(name, true));
+            assert!(!forwards_worker_header(name, false, StatusCode::OK));
+            assert!(!forwards_worker_header(name, true, StatusCode::OK));
         }
     }
 }
