@@ -123,16 +123,23 @@ fn peer_response(mut response: HttpReply) -> HttpReply {
     response
 }
 
-fn runtime_response(worker_response: celld::js::HttpResponse) -> HttpReply {
+fn forwards_worker_header(name: &str, preserve_representation_length: bool) -> bool {
+    !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection" | "transfer-encoding"
+    ) && (preserve_representation_length || !name.eq_ignore_ascii_case("content-length"))
+}
+
+fn runtime_response(
+    worker_response: celld::js::HttpResponse,
+    preserve_representation_length: bool,
+) -> HttpReply {
     let Ok(status) = StatusCode::from_u16(worker_response.status) else {
         return response(StatusCode::INTERNAL_SERVER_ERROR, "invalid Worker status");
     };
     let mut builder = Response::builder().status(status);
     for (name, value) in worker_response.headers {
-        if matches!(
-            name.to_ascii_lowercase().as_str(),
-            "connection" | "content-length" | "transfer-encoding"
-        ) {
+        if !forwards_worker_header(&name, preserve_representation_length) {
             continue;
         }
         builder = builder.header(name, value);
@@ -155,7 +162,10 @@ fn runtime_response(worker_response: celld::js::HttpResponse) -> HttpReply {
         .unwrap_or_else(|_| response(StatusCode::INTERNAL_SERVER_ERROR, "invalid Worker headers"))
 }
 
-fn peer_runtime_response(worker_response: celld::js::HttpResponse) -> HttpReply {
+fn peer_runtime_response(
+    worker_response: celld::js::HttpResponse,
+    preserve_representation_length: bool,
+) -> HttpReply {
     let wire_status = if worker_response.status == 101 && worker_response.ws.is_some() {
         StatusCode::OK
     } else {
@@ -169,10 +179,7 @@ fn peer_runtime_response(worker_response: celld::js::HttpResponse) -> HttpReply 
     };
     let mut builder = Response::builder().status(wire_status);
     for (name, value) in worker_response.headers {
-        if matches!(
-            name.to_ascii_lowercase().as_str(),
-            "connection" | "content-length" | "transfer-encoding"
-        ) {
+        if !forwards_worker_header(&name, preserve_representation_length) {
             continue;
         }
         builder = builder.header(name, value);
@@ -932,6 +939,7 @@ async fn dispatch_cell_fetch(
     body: Vec<u8>,
     headers: Vec<(String, String)>,
 ) -> HttpReply {
+    let preserve_representation_length = method.eq_ignore_ascii_case("HEAD");
     let (reply, receive) = oneshot::channel();
     let (cancel_tx, cancel) = oneshot::channel();
     let accepted = celld::js::submit_do_call(celld::js::DoCallReq {
@@ -963,7 +971,9 @@ async fn dispatch_cell_fetch(
     }
     let _hangup = HangUp(Some(cancel_tx));
     match receive.await {
-        Ok(Ok(worker_response)) => runtime_response(worker_response),
+        Ok(Ok(worker_response)) => {
+            runtime_response(worker_response, preserve_representation_length)
+        }
         Ok(Err(error)) => match error.downcast_ref::<RoutedRequestError>() {
             Some(error) => response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -1032,6 +1042,7 @@ async fn internal_do(request: Request<Incoming>, app: AppHandle, scope: String) 
         .and_then(serde_json::Value::as_str)
         .unwrap_or("GET")
         .to_string();
+    let preserve_representation_length = method.eq_ignore_ascii_case("HEAD");
     let name = value
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -1137,7 +1148,7 @@ async fn internal_do(request: Request<Incoming>, app: AppHandle, scope: String) 
                             ));
                         }
                     }
-                    peer_runtime_response(worker_response)
+                    peer_runtime_response(worker_response, preserve_representation_length)
                 }
                 Err(error) => response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1432,6 +1443,7 @@ async fn handle_ingress(
     }
 
     let (url, method, body, headers, held) = ingress_payload(request, app.trust_forwarded_headers);
+    let preserve_representation_length = method.eq_ignore_ascii_case("HEAD");
     // The host collects a small body here. A read failure at this point
     // can still return status 400. A streamed body has no such point,
     // because that body fails while the handler reads it. The failure
@@ -1452,7 +1464,7 @@ async fn handle_ingress(
         .fetch_worker(url, method, body, headers, connection)
         .await
     {
-        Ok(worker_response) => runtime_response(worker_response),
+        Ok(worker_response) => runtime_response(worker_response, preserve_representation_length),
         Err(error) => match error.downcast_ref::<celld::pool::AdmitError>() {
             // Saturation is not a failure of the request. Answering it now
             // lets the caller retry or shed; holding the connection until its
@@ -3231,6 +3243,26 @@ impl Drop for AbortPeerFetchOnHangUp {
     fn drop(&mut self) {
         if let Some(request_id) = self.request_id {
             self.runtime.abort_fetch(&self.scope, request_id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod response_header_tests {
+    use super::forwards_worker_header;
+
+    #[test]
+    fn preserves_representation_length_only_when_requested() {
+        assert!(!forwards_worker_header("Content-Length", false));
+        assert!(forwards_worker_header("Content-Length", true));
+        assert!(forwards_worker_header("content-type", false));
+    }
+
+    #[test]
+    fn never_forwards_hop_by_hop_framing_headers() {
+        for name in ["Connection", "Transfer-Encoding"] {
+            assert!(!forwards_worker_header(name, false));
+            assert!(!forwards_worker_header(name, true));
         }
     }
 }

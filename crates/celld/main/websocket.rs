@@ -1029,7 +1029,7 @@ pub(crate) async fn handle_websocket(mut request: Request<Incoming>, app: AppHan
                 status: worker_response.status,
             },
         );
-        return runtime_response(worker_response);
+        return runtime_response(worker_response, false);
     };
     if worker_response.status != 101 {
         emit_websocket_connection_timing(
