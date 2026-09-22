@@ -578,6 +578,7 @@ pub fn worker_compat(metadata: &serde_json::Value) -> js::Compat {
         date.is_some_and(|date| date >= since)
     };
     js::Compat {
+        python_workers: has_flag("python_workers"),
         delete_all_deletes_alarm: switch(
             "delete_all_deletes_alarm",
             "delete_all_preserves_alarm",

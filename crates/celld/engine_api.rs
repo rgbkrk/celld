@@ -245,6 +245,11 @@ impl std::error::Error for CellOverloaded {}
 /// is every switch off; production derives real values in `main`.
 #[derive(Clone, Copy, Default)]
 pub struct Compat {
+    /// `python_workers`: fail closed after a hard V8 execution termination.
+    /// Termination can abandon interpreter (e.g. CPython/Wasm) frames and
+    /// scheduler state, so the host refuses later entry into that isolate and
+    /// wakes its suspended requests. This supplies no Python adapter.
+    pub python_workers: bool,
     pub delete_all_deletes_alarm: bool,
     /// `js_rpc`: RPC on a Durable Object class that does not extend
     /// `DurableObject` (Workerd worker-rpc.c++ getTargetInfo()).
