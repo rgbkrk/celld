@@ -2204,12 +2204,24 @@ async fn wake_with_cross_entry_gate(
     budget: Duration,
 ) -> Wake {
     let wait = entry.prepare_cross_entry_gate_wait();
-    match wait
-        .wait(wake(ops, entry, budget), |wake| matches!(wake, Wake::Idle))
-        .await
-    {
-        js::input_gate_lifecycle::WaitOutcome::StateChanged => Wake::CrossEntryGateChanged,
-        js::input_gate_lifecycle::WaitOutcome::Ordinary(wake) => wake,
+    // Taken before `wake` borrows the entry; resolves only for an opted-in
+    // isolate that another entry's hard termination invalidated.
+    let invalidated = entry.invalidation_wait();
+    let ordinary = async {
+        match wait
+            .wait(wake(ops, entry, budget), |wake| matches!(wake, Wake::Idle))
+            .await
+        {
+            js::input_gate_lifecycle::WaitOutcome::StateChanged => Wake::CrossEntryGateChanged,
+            js::input_gate_lifecycle::WaitOutcome::Ordinary(wake) => wake,
+        }
+    };
+    // `Poll` re-enters through `turn_poll`, which fails the entry through
+    // normal reply/durability handling without running JavaScript.
+    asyncrt::select_biased! {
+        "runtime invalidation must wake suspended guest work before another guest turn";
+        _ = invalidated => Wake::Poll,
+        ordinary = ordinary => ordinary,
     }
 }
 

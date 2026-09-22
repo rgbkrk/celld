@@ -2291,6 +2291,7 @@ impl WorkerIsolate {
             return false;
         };
         entry.fail_in_turn(error);
+        entry.invalidation_handled = true;
         entry.background = None;
         entry.abandon();
         true
@@ -2502,6 +2503,8 @@ struct ActorRuntimeState {
     invalidate_on_termination: bool,
     /// Latched by `take_execution_termination_in_context`; never cleared.
     invalidated: AtomicBool,
+    /// Wakes suspended requests of this isolate once `invalidated` latches.
+    invalidation_notify: tokio::sync::Notify,
     promises: std::sync::Mutex<PromiseMap>,
     termination: std::sync::Mutex<Option<ExecutionTermination>>,
     pending_puts: std::sync::Mutex<PendingPuts>,
@@ -2897,6 +2900,7 @@ fn take_execution_termination_in_context(
             .filter(|state| state.invalidate_on_termination)
         {
             state.invalidated.store(true, Ordering::Release);
+            state.invalidation_notify.notify_waiters();
         }
         scope.cancel_terminate_execution();
     }
@@ -3394,9 +3398,35 @@ pub struct InFlight {
     /// The isolate this entry's ops belong to, so `abandon` can drop their
     /// resolvers without a scope to reach the isolate through.
     runtime_state: Arc<ActorRuntimeState>,
+    /// This entry already failed because its isolate was invalidated. Its
+    /// output gates then keep their ordinary wait instead of re-waking on a
+    /// signal that stays ready forever.
+    invalidation_handled: bool,
 }
 
 impl InFlight {
+    /// Resolves once this entry's opted-in isolate is invalidated; pending
+    /// forever otherwise. Subscribes before reading the latch, so an
+    /// invalidation between turns cannot lose its wakeup.
+    pub(crate) fn invalidation_wait(&self) -> impl std::future::Future<Output = ()> + 'static {
+        let state = (self.runtime_state.invalidate_on_termination && !self.invalidation_handled)
+            .then(|| self.runtime_state.clone());
+        async move {
+            let Some(state) = state else {
+                return std::future::pending().await;
+            };
+            loop {
+                let notified = state.invalidation_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if state.invalidated.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
     /// Read the handler's settled value in the shape this entry answers, end
     /// the event, and reply.
     ///
@@ -4687,6 +4717,7 @@ fn begin<'s>(
         Ok((promise, active_request_id)) => {
             tc.perform_microtask_checkpoint();
             let entry = InFlight {
+                invalidation_handled: false,
                 runtime_state,
                 promise: v8::Global::new(tc, promise),
                 context,
@@ -4781,6 +4812,7 @@ fn begin_entrypoint_rpc(
         Ok(promise) => {
             tc.perform_microtask_checkpoint();
             let entry = InFlight {
+                invalidation_handled: false,
                 runtime_state: actor_runtime_state(tc),
                 promise: v8::Global::new(tc, promise),
                 context,
@@ -5020,6 +5052,7 @@ fn begin_queue(
         Ok(promise) => {
             tc.perform_microtask_checkpoint();
             let entry = InFlight {
+                invalidation_handled: false,
                 runtime_state: actor_runtime_state(tc),
                 promise: v8::Global::new(tc, promise),
                 context,
@@ -5200,6 +5233,7 @@ fn start_cell_event<'s>(
                 ws_capture_set_promise(&context, v8::Global::new(tc, promise));
             }
             let entry = InFlight {
+                invalidation_handled: false,
                 runtime_state: runtime_state.clone(),
                 promise: v8::Global::new(tc, promise),
                 context,
@@ -5258,6 +5292,7 @@ fn start_cell_event<'s>(
                 let promise = resolved_promise(tc, undefined)
                     .expect("a finishing cell event can create a resolved promise");
                 Begun::Running(Box::new(InFlight {
+                    invalidation_handled: false,
                     runtime_state,
                     promise: v8::Global::new(tc, promise),
                     context,
@@ -5823,6 +5858,13 @@ fn settle_isolate_heap(isolate: &mut v8::Isolate) {
 }
 
 impl Worker {
+    /// Whether an opted-in hard termination made this isolate unusable.
+    pub(crate) fn is_invalidated(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|inner| inner.runtime_state.invalidated.load(Ordering::Acquire))
+    }
+
     /// Compile the worker module, wire the DO harness, and extract the entry
     /// `fetch`. `do_classes` come from the manifest; `bindings` maps a binding
     /// name to a DO class name (from wrangler metadata).

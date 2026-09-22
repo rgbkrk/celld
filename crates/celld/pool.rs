@@ -258,6 +258,14 @@ impl Slot {
         let previous = CURRENT_SLOT.replace(Some(self.me.clone()));
         let result = f(worker);
         CURRENT_SLOT.set(previous);
+        // An invalidated isolate can still have affiliated requests (and, for
+        // Durable Objects, resident cells). Stop new placement now; the normal
+        // drain counters keep its heap until those owners release it, and
+        // their later turns fail through this Worker's refusal path.
+        if worker.is_invalidated() && !self.retiring.swap(true, Ordering::Relaxed) {
+            tracing::info!(isolate = %self.heap_id, slot = self.id, "invalidated isolate retiring");
+            self.freed.notify_waiters();
+        }
         result
     }
 
