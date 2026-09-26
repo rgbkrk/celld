@@ -2293,6 +2293,9 @@ impl WorkerIsolate {
         entry.fail_in_turn(error);
         entry.invalidation_handled = true;
         entry.background = None;
+        // Only JavaScript retires pending WorkerEntrypoint events, and none
+        // will run; left in place they would re-select PendingEventIdle.
+        let _ = entry.context.take_pending_events();
         entry.abandon();
         true
     }
@@ -2847,6 +2850,11 @@ fn finish_retired_input_gate_context(scope: &mut v8::PinScope, context: &IoConte
 }
 
 fn retire_input_gate_js_context(scope: &mut v8::PinScope, context_id: u64) {
+    // The host claims are already retired; an invalidated isolate runs no
+    // harness JavaScript to mirror that.
+    if runtime_invalidated(scope) {
+        return;
+    }
     let Ok(function) = internal_function(scope, "__retireInputGateContext") else {
         return;
     };
@@ -2905,6 +2913,17 @@ fn take_execution_termination_in_context(
             .filter(|state| state.invalidate_on_termination)
         {
             state.invalidated.store(true, Ordering::Release);
+            // V8's default `kAuto` policy runs queued microtasks whenever a
+            // later host call into JavaScript returns to depth zero; the
+            // termination did not clear that queue. No checkpoint may run
+            // guest reactions against abandoned state.
+            scope.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+            // Stop placement now, not after the turn: this turn may already
+            // have sent the terminated request's error, and a retry must not
+            // land here. The turn's own check remains the backstop.
+            if let Some(slot) = crate::pool::current_slot() {
+                slot.retire_invalidated();
+            }
             state.invalidation_notify.notify_waiters();
             fail_invalidated_response_streams(state);
         }
@@ -2930,6 +2949,15 @@ fn take_execution_termination_in_context(
     is_terminating.then(|| anyhow!("JavaScript execution was terminated"))
 }
 
+/// Whether this isolate latched invalidation. Host code that would call into
+/// JavaScript later in the terminating turn checks this and does the host
+/// half only.
+fn runtime_invalidated(scope: &mut v8::PinScope) -> bool {
+    scope
+        .get_slot::<Arc<ActorRuntimeState>>()
+        .is_some_and(|state| state.invalidated.load(Ordering::Acquire))
+}
+
 /// End every response body the invalidated isolate was producing with the
 /// invalidation error, through the same writer close a JavaScript stream
 /// error uses. No guest code runs, and the consumer sees a failure rather than
@@ -2949,8 +2977,29 @@ fn fail_invalidated_response_streams(state: &ActorRuntimeState) {
             stream_id,
             INVALIDATED_RUNTIME_ERROR.to_string(),
         );
+        let service = service.clone();
         asyncrt::spawn(async move {
-            let _ = close.await;
+            // A guest close already in progress holds the writer until the
+            // abandoned op that owned it is dropped at the end of this turn;
+            // retry briefly rather than leave the body to the idle timeout.
+            let mut result = close.await;
+            for _ in 0..40 {
+                // Only a close in progress can clear; a closed service
+                // (shutdown) cannot.
+                if result.as_ref().map_or_else(
+                    |error| error.as_str() == HTTP_STREAM_REGISTRATION_CLOSED,
+                    |_| true,
+                ) {
+                    break;
+                }
+                asyncrt::sleep(Duration::from_millis(50)).await;
+                result = response_stream_close(
+                    service.clone(),
+                    stream_id,
+                    INVALIDATED_RUNTIME_ERROR.to_string(),
+                )
+                .await;
+            }
         })
         .detach();
     }
@@ -4538,6 +4587,19 @@ impl Worker {
 /// turn, and the spawn and its classification drain together. Such an op
 /// does not defer retirement: see `retired`.
 fn finish_turn(tc: &mut v8::PinScope, entry: &mut InFlight) -> Vec<Op> {
+    // A begin path that latched invalidation can still hand back a running
+    // entry (a cell event that armed an alarm before it was terminated).
+    // Settling or checkpointing would run guest JavaScript; fail it as a
+    // refused entry instead.
+    if runtime_invalidated(tc) {
+        entry.fail_in_turn(anyhow!(INVALIDATED_RUNTIME_ERROR));
+        entry.invalidation_handled = true;
+        entry.background = None;
+        let _ = entry.context.take_pending_events();
+        entry.abandon();
+        ws_capture_flush_touched(tc, &entry.runtime_state);
+        return Vec::new();
+    }
     if let Err(error) = finish_cpu_turn(tc, entry) {
         let error = take_execution_termination_in_context(tc, Some(&entry.context))
             .unwrap_or_else(|| anyhow!(error));
@@ -9109,7 +9171,8 @@ fn op_response_stream_create(
         let mut streams = state.response_streams.lock().unwrap();
         // A body whose consumer cancelled never reaches the close op. Bound
         // the set by dropping ids whose writer the service already retired.
-        if streams.len() >= 64 {
+        // Amortized: rescan only when the set reaches a new power of two.
+        if streams.len() >= 64 && streams.len().is_power_of_two() {
             let service = http_stream_service();
             streams.retain(|id| service.writer_close_watch(*id).is_some());
         }
@@ -9192,13 +9255,13 @@ fn op_response_stream_close(
 ) {
     let stream_id = args.get(0).integer_value(scope).unwrap_or(0).max(0) as u64;
     let error = args.get(1).to_rust_string_lossy(scope);
-    // Forget a tracked body only once its close is queued, so a termination
+    // Forget a tracked body only once its close succeeded, so a termination
     // that abandons this op mid-close still errors the writer.
     let tracked = Some(actor_runtime_state(scope)).filter(|state| state.invalidate_on_termination);
     let close = response_stream_close(http_stream_service(), stream_id, error);
     let id = asyncrt::enqueue(async move {
         let closed = close.await;
-        if let Some(state) = tracked {
+        if let Some(state) = tracked.filter(|_| closed.is_ok()) {
             state.response_streams.lock().unwrap().remove(&stream_id);
         }
         closed?;

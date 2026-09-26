@@ -262,11 +262,20 @@ impl Slot {
         // Durable Objects, resident cells). Stop new placement now; the normal
         // drain counters keep its heap until those owners release it, and
         // their later turns fail through this Worker's refusal path.
-        if worker.is_invalidated() && !self.retiring.swap(true, Ordering::Relaxed) {
+        if worker.is_invalidated() {
+            self.retire_invalidated();
+        }
+        result
+    }
+
+    /// Stop placing work on an isolate whose Worker was invalidated. Normal
+    /// drain counters keep its heap until affiliated owners release it.
+    /// Idempotent; called at the latch and again after the turn.
+    pub(crate) fn retire_invalidated(&self) {
+        if !self.retiring.swap(true, Ordering::Relaxed) {
             tracing::info!(isolate = %self.heap_id, slot = self.id, "invalidated isolate retiring");
             self.freed.notify_waiters();
         }
-        result
     }
 
     /// Reserve one event through its complete lifetime, including the reply

@@ -1055,6 +1055,13 @@ pub(super) fn begin_event_context<'s>(
 pub(super) fn end_event_context<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> Result<Option<v8::Local<'s, v8::Promise>>> {
+    // A hard termination that invalidated this isolate earlier in the turn:
+    // pop the host frame without running `__endEvent` (or the guest-visible
+    // `Promise.allSettled` its waitUntil aggregate uses).
+    if super::runtime_invalidated(scope) {
+        let _ = super::current_context().end_event();
+        return Ok(None);
+    }
     let function = event_hook(scope, |hooks| &hooks.end_event)?;
     let recv = v8::undefined(scope).into();
     let value = function
