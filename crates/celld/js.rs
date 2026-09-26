@@ -2505,6 +2505,11 @@ struct ActorRuntimeState {
     invalidated: AtomicBool,
     /// Wakes suspended requests of this isolate once `invalidated` latches.
     invalidation_notify: tokio::sync::Notify,
+    /// Response bodies this opted-in isolate still produces. An answered
+    /// request's streaming body has no suspended entry to fail, so
+    /// invalidation errors these writers instead of leaving the consumer to
+    /// the idle timeout. Tracked only when `invalidate_on_termination`.
+    response_streams: Mutex<HashSet<u64>>,
     promises: std::sync::Mutex<PromiseMap>,
     termination: std::sync::Mutex<Option<ExecutionTermination>>,
     pending_puts: std::sync::Mutex<PendingPuts>,
@@ -2901,6 +2906,7 @@ fn take_execution_termination_in_context(
         {
             state.invalidated.store(true, Ordering::Release);
             state.invalidation_notify.notify_waiters();
+            fail_invalidated_response_streams(state);
         }
         scope.cancel_terminate_execution();
     }
@@ -2922,6 +2928,32 @@ fn take_execution_termination_in_context(
         return Some(anyhow!(termination.error));
     }
     is_terminating.then(|| anyhow!("JavaScript execution was terminated"))
+}
+
+/// End every response body the invalidated isolate was producing with the
+/// invalidation error, through the same writer close a JavaScript stream
+/// error uses. No guest code runs, and the consumer sees a failure rather than
+/// a clean (truncated) end of body. Detached: a backpressured close must not
+/// hold the isolate turn that latched the invalidation.
+fn fail_invalidated_response_streams(state: &ActorRuntimeState) {
+    let streams = std::mem::take(&mut *state.response_streams.lock().unwrap());
+    if streams.is_empty() {
+        return;
+    }
+    let service = http_stream_service();
+    // One task per body, so a consumer that stopped reading cannot delay
+    // the error on another.
+    for stream_id in streams {
+        let close = response_stream_close(
+            service.clone(),
+            stream_id,
+            INVALIDATED_RUNTIME_ERROR.to_string(),
+        );
+        asyncrt::spawn(async move {
+            let _ = close.await;
+        })
+        .detach();
+    }
 }
 
 fn take_execution_termination(scope: &mut v8::PinScope) -> Option<anyhow::Error> {
@@ -9072,6 +9104,17 @@ fn op_response_stream_create(
         scope.throw_exception(exception);
         return;
     };
+    let state = actor_runtime_state(scope);
+    if state.invalidate_on_termination {
+        let mut streams = state.response_streams.lock().unwrap();
+        // A body whose consumer cancelled never reaches the close op. Bound
+        // the set by dropping ids whose writer the service already retired.
+        if streams.len() >= 64 {
+            let service = http_stream_service();
+            streams.retain(|id| service.writer_close_watch(*id).is_some());
+        }
+        streams.insert(stream_id);
+    }
     rv.set(v8::Number::new(scope, stream_id as f64).into());
 }
 
@@ -9149,9 +9192,16 @@ fn op_response_stream_close(
 ) {
     let stream_id = args.get(0).integer_value(scope).unwrap_or(0).max(0) as u64;
     let error = args.get(1).to_rust_string_lossy(scope);
+    // Forget a tracked body only once its close is queued, so a termination
+    // that abandons this op mid-close still errors the writer.
+    let tracked = Some(actor_runtime_state(scope)).filter(|state| state.invalidate_on_termination);
     let close = response_stream_close(http_stream_service(), stream_id, error);
     let id = asyncrt::enqueue(async move {
-        close.await?;
+        let closed = close.await;
+        if let Some(state) = tracked {
+            state.response_streams.lock().unwrap().remove(&stream_id);
+        }
+        closed?;
         Ok(String::new())
     });
     rv.set(promise_for(scope, id));
