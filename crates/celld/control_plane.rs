@@ -2198,7 +2198,7 @@ fn validate_asset_index_entry(path: &str, sha256: &str, bytes: u64) -> anyhow::R
     if asset_blob_key(sha256).is_none() {
         return Err(anyhow!("invalid asset digest in index: {sha256:?}"));
     }
-    if bytes > 25 * 1024 * 1024 {
+    if bytes > crate::env_vars::max_asset_file_bytes()? {
         return Err(anyhow!("asset exceeds runtime size limit: {path:?}"));
     }
     Ok(())

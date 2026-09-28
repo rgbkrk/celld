@@ -1310,6 +1310,7 @@ fn cleanup_cache_files(root: &Path, limit: u64) -> anyhow::Result<()> {
 }
 
 fn validate_index(index: &AssetIndex, reference: &AssetManifestRef) -> anyhow::Result<()> {
+    let max_file_bytes = crate::env_vars::max_asset_file_bytes()?;
     if index.schema_version != 1 {
         return Err(anyhow!(
             "unsupported asset index schema: {}",
@@ -1377,7 +1378,7 @@ fn validate_index(index: &AssetIndex, reference: &AssetManifestRef) -> anyhow::R
         if !is_canonical_asset_path(path)
             || path == "/"
             || asset_blob_key(&entry.sha256).is_none()
-            || entry.bytes > 25 * 1024 * 1024
+            || entry.bytes > max_file_bytes
         {
             return Err(anyhow!("invalid asset index entry: {path:?}"));
         }

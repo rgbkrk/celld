@@ -182,7 +182,6 @@ pub fn operator_hint(class: &str) -> &'static str {
 
 const MAX_ASSET_FILES: usize = 20_000;
 const MAX_ASSET_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_ASSET_FILE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_ASSET_DIRECTIVE_BYTES: u64 = 100 * 1024;
 const ASSET_UPLOAD_CONCURRENCY: usize = 16;
 
@@ -2626,6 +2625,7 @@ fn read_asset_directive(directory: &Path, name: &str) -> anyhow::Result<Option<S
 }
 
 fn build_assets(project: &ProjectAssets) -> anyhow::Result<BuiltAssets> {
+    let max_file_bytes = crate::env_vars::max_asset_file_bytes()?;
     let mut files = Vec::new();
     collect_asset_files(&project.directory, "", &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
@@ -2639,8 +2639,8 @@ fn build_assets(project: &ProjectAssets) -> anyhow::Result<BuiltAssets> {
     for (relative, path) in files {
         let metadata =
             std::fs::metadata(&path).with_context(|| format!("inspect {}", path.display()))?;
-        if metadata.len() > MAX_ASSET_FILE_BYTES {
-            bail!("asset /{relative} exceeds the 25 MiB file limit");
+        if metadata.len() > max_file_bytes {
+            bail!("asset /{relative} exceeds the {max_file_bytes}-byte file limit");
         }
         total_bytes = total_bytes
             .checked_add(metadata.len())

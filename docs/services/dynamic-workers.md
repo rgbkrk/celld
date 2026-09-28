@@ -38,7 +38,11 @@ and `modules` maps each module name to its source. A value in that map can also
 be wasm bytes, and the [WebAssembly page](../wasm.md#dynamic-workers) shows
 that form. `compatibilityDate` and `compatibilityFlags` select the runtime
 behavior of the loaded Worker, and celld reads both. The module sources can
-total 64 MiB, which is the workerd limit. A `WorkerCode.limits` object can
+total 64 MiB by default, matching workerd. A fleet operator can set
+`CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES` to a positive byte count before starting
+each node to admit larger module sets. This is node configuration; loaded code
+cannot raise it through `WorkerCode`. Heap, execution, and admission limits
+continue to apply independently. A `WorkerCode.limits` object can
 set `cpuMs` and `subRequests` for each invocation. celld refuses a
 `WorkerCode` that sets `allowExperimental`. Read the
 [API reference](https://developers.cloudflare.com/dynamic-workers/api-reference/)

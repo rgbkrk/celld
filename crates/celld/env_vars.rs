@@ -9,6 +9,13 @@
 use anyhow::{anyhow, bail};
 
 pub const DEFAULT_SHUTDOWN_TOTAL_MS: u64 = 40_000;
+
+/// Shared by deployment assembly, managed deployment validation and serving
+/// nodes. Operators must configure the same policy on all three paths.
+pub fn max_asset_file_bytes() -> anyhow::Result<u64> {
+    positive_or("CELLD_MAX_ASSET_FILE_BYTES", 25 * 1024 * 1024)
+}
+
 /// One process stop budget and the internal waits derived from it.
 /// The absolute deadline also bounds progress extensions, so neither wait
 /// grants time beyond the supervisor-facing process budget.
@@ -233,6 +240,7 @@ pub fn validate() -> anyhow::Result<()> {
         "CELLD_LTX_COMPACTION_MIN_TXIDS",
         "CELLD_LTX_DURABILITY_TIMEOUT_SECS",
         "CELLD_MAX_CELL_REQUESTS",
+        "CELLD_MAX_ASSET_FILE_BYTES",
         "CELLD_MAX_OUTBOUND_WEBSOCKETS",
         "CELLD_MAX_REQUEST_BODY_BYTES",
         "CELLD_MAX_REQUESTS",
@@ -268,6 +276,8 @@ pub fn validate() -> anyhow::Result<()> {
     }
 
     shutdown_timing()?;
+
+    positive::<usize>("CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES")?;
 
     if let Some(value) = optional::<u64>("CELLD_PRESENCE_HEARTBEAT_MS")? {
         if !(50..=30_000).contains(&value) {
