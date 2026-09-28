@@ -238,6 +238,14 @@ class CelldHttpBodyStream extends ReadableStream {
     ];
   }
 }
+// Body streams expose the standard constructor to consumers. In particular,
+// the Python Workers SDK validates JS body types by constructor.name.
+// Keep the internal prototypes and their specialized read/tee behavior.
+for (const bodyStream of [CelldBodyStream, CelldHttpBodyStream]) {
+  Object.defineProperty(bodyStream.prototype, "constructor", {
+    value: ReadableStream, writable: true, configurable: true,
+  });
+}
 globalThis.Response = class Response {
   constructor(body, init = {}) {
     // Streaming/iterable detection runs only for object bodies, so

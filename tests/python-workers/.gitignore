@@ -1,0 +1,3 @@
+.cache/
+.wrangler/
+node_modules/
