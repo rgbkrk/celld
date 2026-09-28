@@ -131,6 +131,7 @@ A cell fits a workload that divides into named, stateful units:
 - [Telemetry](telemetry.md)
 - [Testing](testing.md)
 - [WebAssembly](wasm.md)
+- [Python Workers](python.md)
 
 ## Services
 
