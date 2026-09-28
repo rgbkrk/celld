@@ -1,0 +1,26 @@
+[
+  {
+    "name": "workers-runtime-sdk",
+    "version": "1.9.0",
+    "url": "https://files.pythonhosted.org/packages/94/3d/053deb135d4db2ef6f6c3ccdeb86d7829de3c271f7ae02cec73da8f65891/workers_runtime_sdk-1.9.0-py3-none-any.whl",
+    "sha256": "36209f94984686264db4e1fd410d51ac3460f2a2ab3cc29869699b975e1e1331"
+  },
+  {
+    "name": "beautifulsoup4",
+    "version": "4.15.0",
+    "url": "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl",
+    "sha256": "d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9"
+  },
+  {
+    "name": "soupsieve",
+    "version": "2.10",
+    "url": "https://files.pythonhosted.org/packages/66/87/5ed59e1d0290564e2027ed066c52b059892c4637741337fc0967183c8d4d/soupsieve-2.10-py3-none-any.whl",
+    "sha256": "8596eb8967d744174820280fa62b4542a2e955bfaccca73ed8a13c6eb8e9b502"
+  },
+  {
+    "name": "typing-extensions",
+    "version": "4.16.0",
+    "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+    "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+  }
+]

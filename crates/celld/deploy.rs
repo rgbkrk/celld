@@ -18,8 +18,9 @@ use crate::protocol::{
     asset_blob_key, AssetConfig, AssetEntry, AssetIndex, AssetManifestRef, DeployPointer, Manifest,
     ModuleKind, ModuleRef, QueueConsumerAttachment, QueueConsumerConfig, QueueConsumerDeployment,
     Rollout, RunWorkerFirst, FEATURE_ASSETS_V1, FEATURE_CONTAINERS_V1, FEATURE_CRON_V1,
-    FEATURE_D1_V1, FEATURE_KV_V1, FEATURE_QUEUES_V1, FEATURE_R2_V1, FEATURE_SQLITE_VEC_V1,
-    FEATURE_WASM_V1, FEATURE_WORKFLOWS_V1, QUEUE_CONSUMER_ATTACHMENT_SCHEMA_VERSION,
+    FEATURE_D1_V1, FEATURE_KV_V1, FEATURE_PYTHON_WORKERS_V1, FEATURE_QUEUES_V1, FEATURE_R2_V1,
+    FEATURE_SQLITE_VEC_V1, FEATURE_WASM_V1, FEATURE_WORKFLOWS_V1,
+    QUEUE_CONSUMER_ATTACHMENT_SCHEMA_VERSION,
 };
 use anyhow::{anyhow, bail, Context};
 use flate2::write::GzEncoder;
@@ -33,6 +34,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+mod python;
 
 /// Config keys we understand. Anything else is an error: refusing is
 /// compat-safe, guessing produces confusing activation failures later.
@@ -299,6 +302,9 @@ struct Project {
     has_queues: bool,
     has_r2: bool,
     containers: Vec<ContainerDecl>,
+    /// Set when `main` is a `.py` file: the Python behavior its
+    /// compatibility date and flags select.
+    python: Option<python::PythonCompat>,
 }
 
 /// The two Wrangler bundling knobs that celld forwards to esbuild.
@@ -600,7 +606,11 @@ pub fn build(options: &Options) -> anyhow::Result<Built> {
         .entry
         .as_deref()
         .map(|entry| {
-            if project.no_bundle {
+            if let Some(compat) = &project.python {
+                let (output, descriptor) = python::build(&root, entry, compat)?;
+                project.metadata["python_runtime"] = descriptor;
+                Ok(output)
+            } else if project.no_bundle {
                 // Already bundled by the caller's toolchain. Read it as it is;
                 // running esbuild over a Vite build is what corrupts it.
                 let path = root.join(entry);
@@ -652,6 +662,7 @@ pub fn build(options: &Options) -> anyhow::Result<Built> {
         .and_then(Value::as_array)
         .is_some_and(|flags| flags.iter().any(|flag| flag.as_str() == Some("sqlite_vec")));
     let uses_d1 = project.do_classes.iter().any(|class| class == D1_CLASS);
+    let python_runtime = project.python.is_some();
     let manifest = Manifest {
         schema_version: if asset_reference.is_some() { 2 } else { 1 },
         version: version.clone(),
@@ -707,6 +718,9 @@ pub fn build(options: &Options) -> anyhow::Result<Built> {
             }
             if !wasm_names.is_empty() {
                 features.push(FEATURE_WASM_V1.to_string());
+            }
+            if python_runtime {
+                features.push(FEATURE_PYTHON_WORKERS_V1.to_string());
             }
             features
         },
@@ -1315,6 +1329,14 @@ fn read_project(
     if no_bundle && main.is_none() {
         bail!("config sets `no_bundle` without `main`");
     }
+    let python = main
+        .as_deref()
+        .filter(|main| main.ends_with(".py"))
+        .map(|_| {
+            python::check_supported_events(object)?;
+            python::python_compat(object)
+        })
+        .transpose()?;
     let bundle = read_bundle_config(object)?;
     // `define` and `rules` describe the esbuild run, and `no_bundle` is the
     // absence of one. Accepting both would produce a deployment that silently
@@ -1951,6 +1973,7 @@ fn read_project(
         queue_consumers,
         has_r2: !r2_buckets.is_empty(),
         containers,
+        python,
     })
 }
 

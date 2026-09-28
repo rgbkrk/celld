@@ -1,0 +1,8 @@
+[project]
+name = "python-fixture"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = ["beautifulsoup4==4.15.0"]
+
+[dependency-groups]
+dev = ["workers-py==1.17.4", "workers-runtime-sdk==1.9.0"]

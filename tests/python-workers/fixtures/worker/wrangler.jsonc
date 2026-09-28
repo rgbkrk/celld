@@ -1,0 +1,7 @@
+{
+  "name": "python-fixture",
+  "main": "src/entry.py",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["python_workers"],
+  "kv_namespaces": [{ "binding": "KV", "id": "python-fixture-kv" }]
+}

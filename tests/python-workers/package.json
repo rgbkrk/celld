@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --test-concurrency=1 --test-timeout=300000 *.test.mjs"
+    "vendor": "node vendor.mjs",
+    "test": "node vendor.mjs && node --test --test-concurrency=1 --test-timeout=300000 *.test.mjs"
   },
   "devDependencies": {
     "esbuild": "0.28.2",
