@@ -357,6 +357,8 @@ TUNING:
   CELLD_MAX_RESIDENT_CELLS        Resident-cell hard cap, enforced at admission
   CELLD_MAX_CELL_REQUESTS         Concurrent fetches per cell (default: 64)
   CELLD_MAX_REQUEST_BODY_BYTES    Ingress request body limit (default: 1 GiB)
+  CELLD_MAX_ASSET_FILE_BYTES      Per-file asset limit (default: 25 MiB)
+  CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES  Loaded module total (default: 64 MiB)
   CELLD_PRESSURE_OWNERSHIP        release to rebalance, sticky to cache locally
   CELLD_MAX_RSS_MB                Active-memory shed threshold (default: 80%; 0 disables)
   CELLD_ALARM_RESIDENT_MS         Near-alarm residency window

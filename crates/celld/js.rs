@@ -10158,10 +10158,22 @@ fn op_svc_call_impl(
 // and invokes it. The loaded isolate uses the same turn driver as every
 // stateless Worker, so an awaited operation holds no thread or isolate.
 
-// Mirror the workerd dynamic-worker limits (worker-loader.c++): 64 MiB total
-// module bytes, 1 MiB env. Messages match so the conformance cases pass.
-const MAX_DYNAMIC_WORKER_CODE_SIZE: usize = 64 * 1024 * 1024;
+// Default to workerd's module-byte ceiling. A fleet operator may admit larger
+// compiled runtimes; loaded guest code cannot change this host policy.
+const DEFAULT_MAX_DYNAMIC_WORKER_CODE_SIZE: usize = 64 * 1024 * 1024;
 const MAX_DYNAMIC_WORKER_ENV_SIZE: usize = 1024 * 1024;
+
+fn dynamic_worker_code_limit() -> usize {
+    static LIMIT: OnceLock<usize> = OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        crate::env_vars::positive_or(
+            "CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES",
+            DEFAULT_MAX_DYNAMIC_WORKER_CODE_SIZE,
+        )
+        .expect("validated CELLD_MAX_DYNAMIC_WORKER_CODE_BYTES")
+    })
+}
+
 /// The largest `props` value one loaded entrypoint or Durable Object class can
 /// carry, as structured-clone bytes. Workerd does not impose this bound, but
 /// celld holds the value on a host job for the whole call. The harness shares
@@ -10429,12 +10441,13 @@ fn op_loader_load(
                 ModuleSource::Wasm(bytes) => bytes.len(),
             })
             .sum::<usize>();
-    if code_size > MAX_DYNAMIC_WORKER_CODE_SIZE {
+    let max_code_bytes = dynamic_worker_code_limit();
+    if code_size > max_code_bytes {
         return loader_throw(
             scope,
             &format!(
                 "Dynamic Worker code size ({code_size} bytes) exceeds the \
-                 maximum allowed size of {MAX_DYNAMIC_WORKER_CODE_SIZE} bytes."
+                 maximum allowed size of {max_code_bytes} bytes."
             ),
         );
     }

@@ -2,7 +2,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -67,7 +67,10 @@ export async function startCelld(files, config = {}, environment = {}, { watch =
     await rm(project, { recursive: true, force: true });
   })();
   try {
-    for (const [name, contents] of Object.entries(files)) await writeFile(resolve(project, name), contents);
+    for (const [name, contents] of Object.entries(files)) {
+      await mkdir(dirname(resolve(project, name)), { recursive: true });
+      await writeFile(resolve(project, name), contents);
+    }
     await writeFile(resolve(project, 'wrangler.json'), JSON.stringify({
       name: 'python-runtime-probe', main: 'index.js', no_bundle: true,
       compatibility_date: '2026-09-21', ...config,
