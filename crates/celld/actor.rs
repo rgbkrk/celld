@@ -1335,6 +1335,9 @@ pub struct AppHandle {
     /// Whether forwarded scheme and host headers can set `request.url`.
     /// The default is false because a direct client controls both headers.
     pub trust_forwarded_headers: bool,
+    /// Path prefixes that the internal listener sends to the Worker and the
+    /// public listener refuses. Empty unless the operator configures one.
+    pub internal_worker_prefixes: Arc<crate::internal_ingress::InternalWorkerPrefixes>,
     /// The maximum body size for public Worker ingress and direct Durable
     /// Object ingress. The same value must govern both entry points because a
     /// caller can choose either route for an ordinary Durable Object.

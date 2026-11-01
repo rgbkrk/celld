@@ -380,6 +380,10 @@ celld \
 non-loopback `--listen`. You must route the advertised address to the
 internal listener, not to the public listener; celld cannot verify this.
 
+An application can serve an operator-only route from its Worker through the
+internal listener. Name its prefix with `--internal-worker-prefix /internal`,
+and see [security](security.md#serve-an-operator-route-from-the-worker).
+
 ## Add nodes
 
 Start each node with the same bucket settings and its own reachable
@@ -649,6 +653,7 @@ unset variable selects its default. A Boolean variable accepts only `0` or
 | `CELLD_INTERNAL_ADDR` | The peer and operator listener. The same as `--internal-listen` |
 | `CELLD_ADVERTISE` | The internal address that peers can reach. The same as `--advertise` |
 | `CELLD_UNSAFE_PUBLIC_ADVERTISE` | Set to `1` to permit a literal public IP in `CELLD_ADVERTISE`. It does not resolve a DNS name or restrict the internal listener |
+| `CELLD_INTERNAL_WORKER_PREFIXES` | Comma-separated path prefixes that the internal listener sends to the Worker. The same as repeated `--internal-worker-prefix`. See [security](security.md#serve-an-operator-route-from-the-worker) |
 | `CELLD_NODE` | An explicit node-session ID: 1 to 128 ASCII letters, numbers, dots, dashes, or underscores, but not `.` or `..` |
 | `CELLD_WATCH` | The local work directory for SQLite and replication |
 | `CELLD_ESBUILD` | The path of the esbuild executable |

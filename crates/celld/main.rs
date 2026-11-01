@@ -2814,34 +2814,48 @@ async fn internal_log(request: Request<Incoming>, app: AppHandle, path: String) 
     }
 }
 
+/// The answer to a Worker request that arrives after a graceful shutdown
+/// began. The client retries on a node that is not draining.
+fn draining_refusal() -> HttpReply {
+    let mut refused = response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{\"ok\":false,\"draining\":true}",
+    );
+    refused.headers_mut().insert(
+        hyper::header::RETRY_AFTER,
+        hyper::header::HeaderValue::from_static("1"),
+    );
+    refused.headers_mut().insert(
+        hyper::header::CONNECTION,
+        hyper::header::HeaderValue::from_static("close"),
+    );
+    refused
+}
+
 async fn handle_public(
-    request: Request<Incoming>,
+    mut request: Request<Incoming>,
     app: AppHandle,
     connection: ConnectionWorkerRequests,
 ) -> Result<HttpReply, Infallible> {
+    // The marker tells the Worker that a request came through the internal
+    // listener, so no public client may supply it, whatever the path and
+    // whether or not an internal Worker prefix is configured.
+    celld::internal_ingress::strip_marker(request.headers_mut());
     let path = request.uri().path().to_string();
+    // An internal-only Worker route does not exist here. celld answers before
+    // an asset, a WebSocket upgrade, or the Worker can.
+    let internal_only = app.internal_worker_prefixes.refuses_public(&path);
     let draining = app.is_draining();
     let _public_admission = if path == "/.well-known/celld/health" {
         None
     } else {
         let Some(admission) = app.admit_public() else {
-            let mut refused = response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "{\"ok\":false,\"draining\":true}",
-            );
-            refused.headers_mut().insert(
-                hyper::header::RETRY_AFTER,
-                hyper::header::HeaderValue::from_static("1"),
-            );
-            refused.headers_mut().insert(
-                hyper::header::CONNECTION,
-                hyper::header::HeaderValue::from_static("close"),
-            );
-            return Ok(refused);
+            return Ok(draining_refusal());
         };
         Some(admission)
     };
     if path != "/.well-known/celld/health"
+        && !internal_only
         && app.runtime.is_some()
         && fastwebsockets::upgrade::is_upgrade_request(&request)
     {
@@ -2854,6 +2868,7 @@ async fn handle_public(
             response(StatusCode::OK, "{\"ok\":true}")
         }
         "/.well-known/celld/health" => response(StatusCode::SERVICE_UNAVAILABLE, "{\"ok\":false}"),
+        _ if internal_only => response(StatusCode::NOT_FOUND, "{\"error\":\"not_found\"}"),
         _ if app.runtime.is_some() => handle_ingress(request, app, connection).await,
         _ => response(StatusCode::NOT_FOUND, "{\"error\":\"not_found\"}"),
     };
@@ -2866,10 +2881,34 @@ async fn handle_public(
     Ok(result)
 }
 
+/// Send an internal-listener request under an operator-configured prefix to
+/// the Worker, exactly as the public listener would, with the marker that
+/// tells the Worker which listener it came through.
+async fn internal_worker(
+    mut request: Request<Incoming>,
+    app: AppHandle,
+    connection: ConnectionWorkerRequests,
+) -> HttpReply {
+    celld::internal_ingress::set_marker(request.headers_mut());
+    // The public shutdown gate: a Worker call that starts after the drain
+    // began could write past the pre-handoff durability boundary.
+    let Some(_admission) = app.admit_public() else {
+        return draining_refusal();
+    };
+    if fastwebsockets::upgrade::is_upgrade_request(&request) {
+        return handle_websocket(request, app).await;
+    }
+    handle_ingress(request, app, connection).await
+}
+
+/// celld's own routes. `celld::internal_ingress::RESERVED_NAMESPACES` must
+/// cover every path matched here, because startup refuses an internal Worker
+/// prefix only when it overlaps that list.
 async fn handle_internal(
     request: Request<Incoming>,
     app: AppHandle,
     shutdown: mpsc::UnboundedSender<ShutdownMode>,
+    connection: ConnectionWorkerRequests,
 ) -> Result<HttpReply, Infallible> {
     let path = request.uri().path().to_string();
     let draining = app.is_draining();
@@ -3091,6 +3130,12 @@ async fn handle_internal(
                 eviction_response(app.evict(cell.to_string()).await)
             }
         }
+        // Operator-configured Worker routes come after every celld route,
+        // and startup refuses a prefix that overlaps one, so celld's own
+        // routes always win.
+        _ if app.runtime.is_some() && app.internal_worker_prefixes.forwards(&path) => {
+            internal_worker(request, app, connection).await
+        }
         _ => response(StatusCode::NOT_FOUND, "{\"error\":\"not_found\"}"),
     };
     // Close the connection behind any response sent while draining, so
@@ -3273,7 +3318,9 @@ fn serve_http_connection(
                 async move {
                     match surface {
                         HttpSurface::Public => handle_public(request, app, service_requests).await,
-                        HttpSurface::Internal => handle_internal(request, app, shutdown).await,
+                        HttpSurface::Internal => {
+                            handle_internal(request, app, shutdown, service_requests).await
+                        }
                         HttpSurface::Recovery => {
                             let path = request.uri().path().to_string();
                             Ok(match path.as_str() {
@@ -3382,6 +3429,7 @@ fn shutdown_accept_failure_test_action() -> Action {
         advertise: None,
         unsafe_public_advertise: false,
         trust_forwarded_headers: false,
+        internal_worker_prefixes: Default::default(),
         dev_store: None,
     })
 }
@@ -4219,6 +4267,7 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         public_in_flight: Arc::new(AtomicUsize::new(0)),
         drain_pins,
         trust_forwarded_headers: settings.trust_forwarded_headers,
+        internal_worker_prefixes: Arc::new(settings.internal_worker_prefixes.clone()),
         max_outbound_websockets: celld::env_vars::positive_or(
             "CELLD_MAX_OUTBOUND_WEBSOCKETS",
             DEFAULT_MAX_OUTBOUND_WEBSOCKETS,
@@ -4712,6 +4761,12 @@ async fn async_main(telemetry_config: Option<celld::telemetry::Config>) -> anyho
         internal_listener.local_addr()?,
         app.advertise
     ))?;
+    if !app.internal_worker_prefixes.is_empty() {
+        celld::cli_output::Output::new(celld::cli_output::Format::Text).line(format_args!(
+            "celld internal Worker prefixes: {}",
+            app.internal_worker_prefixes.prefixes().join(", ")
+        ))?;
+    }
     let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel();
     #[cfg(all(test, celld_internal_tests))]
     if shutdown_accept_failure_test_active {

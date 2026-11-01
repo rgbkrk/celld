@@ -19,6 +19,9 @@ pub(crate) struct Settings {
     /// Whether forwarded scheme and host headers can set `request.url`.
     /// This option is off unless a trusted proxy replaces both headers.
     pub(crate) trust_forwarded_headers: bool,
+    /// Path prefixes that the internal listener sends to the Worker. Empty
+    /// unless the operator names at least one.
+    pub(crate) internal_worker_prefixes: celld::internal_ingress::InternalWorkerPrefixes,
     /// Set only by the `celld dev` supervisor for its child node. No fleet
     /// flag or public environment variable selects the local backend.
     pub(crate) dev_store: Option<std::path::PathBuf>,
@@ -127,6 +130,7 @@ pub(crate) fn action_from_process() -> anyhow::Result<Action> {
     let mut listen_configured = configured_listen.is_some();
     let mut internal_listen_configured = configured_internal_listen.is_some();
     let mut peers = Vec::new();
+    let mut internal_worker_prefixes = Vec::new();
     let mut read_only = false;
     let mut json = false;
     let mut settings = Settings {
@@ -150,6 +154,15 @@ pub(crate) fn action_from_process() -> anyhow::Result<Action> {
         advertise: configured_advertise,
         unsafe_public_advertise: celld::env_vars::flag("CELLD_UNSAFE_PUBLIC_ADVERTISE", false)?,
         trust_forwarded_headers: celld::env_vars::flag("CELLD_TRUST_FORWARDED_HEADERS", false)?,
+        internal_worker_prefixes: env("CELLD_INTERNAL_WORKER_PREFIXES")
+            .map(|list| {
+                celld::internal_ingress::InternalWorkerPrefixes::parse_list(
+                    "CELLD_INTERNAL_WORKER_PREFIXES",
+                    &list,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default(),
         dev_store: if diagnose {
             None
         } else {
@@ -200,6 +213,10 @@ pub(crate) fn action_from_process() -> anyhow::Result<Action> {
             }
             "--unsafe-public-advertise" => settings.unsafe_public_advertise = true,
             "--trust-forwarded-headers" => settings.trust_forwarded_headers = true,
+            "--internal-worker-prefix" => internal_worker_prefixes.push(
+                args.next()
+                    .ok_or_else(|| anyhow::anyhow!("--internal-worker-prefix requires a value"))?,
+            ),
             "--peer" if diagnose => {
                 let peer = args
                     .next()
@@ -214,6 +231,15 @@ pub(crate) fn action_from_process() -> anyhow::Result<Action> {
                 anyhow::bail!("unknown command or option: {other}; run `celld --help` for usage")
             }
         }
+    }
+    // Options win over the environment, as for every other setting. The
+    // options replace the whole variable rather than adding to it, so one
+    // command line states the complete set.
+    if !internal_worker_prefixes.is_empty() {
+        settings.internal_worker_prefixes = celld::internal_ingress::InternalWorkerPrefixes::parse(
+            "--internal-worker-prefix",
+            &internal_worker_prefixes,
+        )?;
     }
     if !listen_configured {
         settings.listen = if settings.control_plane {
@@ -315,6 +341,12 @@ OPTIONS:
                          Let X-Forwarded-Host and X-Forwarded-Proto set the
                          scheme and host in request.url. Set this option only
                          when a trusted proxy replaces both headers
+  --internal-worker-prefix PREFIX
+                         Send internal-listener requests under PREFIX, a whole
+                         number of path segments such as /internal, to the
+                         Worker with x-celld-internal: 1; repeatable. The
+                         public listener answers 404 under PREFIX. celld always
+                         removes x-celld-internal from public requests
   -h, --help             Show this help
   -V, --version          Show the celld version
 
@@ -333,6 +365,8 @@ ENVIRONMENT:
                                   or restrict CELLD_INTERNAL_ADDR
   CELLD_TRUST_FORWARDED_HEADERS   `1` trusts X-Forwarded-Host and
                                   X-Forwarded-Proto
+  CELLD_INTERNAL_WORKER_PREFIXES  Comma-separated prefixes; same as repeated
+                                  --internal-worker-prefix
   CELLD_NODE                      Node-session ID (default: generated)
   CELLD_WATCH                     Local SQLite/replication working directory
   CELLD_ESBUILD                   Override esbuild executable path

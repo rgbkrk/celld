@@ -34,8 +34,10 @@ you must route the advertised address to the internal listener.
 
 The public listener reserves only `/.well-known/celld/health`: 200 with
 `{"ok":true}` when healthy, 503 otherwise. The Worker owns every other public
-path, including `/health`. The internal listener returns 404 for an unknown
-path, so an operator request cannot become an application request.
+path, including `/health`, unless an operator names an internal Worker
+prefix. The internal listener returns 404 for an unknown path, so an operator
+request cannot become an application request unless its path is under an
+internal Worker prefix.
 
 The internal listener has three request groups, and all three require the
 trusted private network:
@@ -116,6 +118,57 @@ An error body has this form:
 A malformed scope returns 400. An error does not prove that the runtime is
 still resident. The runtime stop has no overall timeout, so a stop that never
 returns keeps the request pending.
+
+## Serve an operator route from the Worker
+
+An application can keep an administration route out of the public listener.
+Name its path prefix with `--internal-worker-prefix`, once for each prefix, or
+list the prefixes in `CELLD_INTERNAL_WORKER_PREFIXES`, separated by commas.
+The options replace the variable.
+
+```sh
+celld --bucket s3://my-cells-bucket \
+  --listen 0.0.0.0:8080 \
+  --internal-listen 127.0.0.1:8081 \
+  --internal-worker-prefix /internal
+```
+
+A prefix is a whole number of path segments: `/internal` and `/internal/`
+both cover `/internal` and `/internal/quota`, and neither covers
+`/internalx`. A prefix contains only letters, digits, and `-._~!$&'()*+,;=:@`.
+celld refuses to start with a prefix that covers or falls inside one of its
+own route namespaces: `/.well-known/celld`, `/cell`, `/do`, `/evict`,
+`/peer`, `/rebalance`, `/reload`, `/runtime`, `/shutdown`, and `/state`.
+
+With a prefix configured:
+
+- The internal listener sends a request under the prefix to the deployed
+  Worker, as the public listener would, and sets `x-celld-internal: 1`. It
+  replaces any value that the client sent. It forwards only a canonical path:
+  a path that the URL parser changes, such as one with a `.`, `..`, or
+  `%2e%2e` segment, or whose percent-decoded form leaves the prefix, receives
+  celld's 404. The comparison is case-sensitive. Every other unknown path
+  still receives celld's 404.
+- The public listener answers 404 with `{"error":"not_found"}` for a path
+  under the prefix and does not run the Worker or serve an asset. It refuses
+  every reading of the path: the raw request target, the pathname that
+  `new URL(request.url)` returns, and the fully percent-decoded path with dot
+  segments resolved and empty segments dropped. That comparison ignores ASCII
+  case. A public route under the prefix is therefore unreachable.
+
+The public listener removes `x-celld-internal` from every request, whatever
+the path and whether or not a prefix is configured. The Worker can therefore
+treat the header as proof that the request came through the internal
+listener. Check it in the route as well: the header is the trust boundary,
+and the public refusal protects a route that forgets the check.
+
+This boundary is only as strong as the internal listener's network. Bind the
+internal listener to loopback, or to a private network that admits only
+operators and fleet nodes, before you serve an operator route this way. A
+peer node can reach the route too, and so can an outbound `fetch()` from
+application code on the node, because celld does not block loopback
+destinations. A Worker that fetches a URL a client chooses must refuse the
+internal listener's address.
 
 ## Set the forwarded-header policy
 
